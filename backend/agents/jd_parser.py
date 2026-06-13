@@ -6,19 +6,40 @@ Model: Groq Llama-3.3-70b (free, configured via env)
 import json
 import logging
 import os
-import re
-
+import re, asyncio
+from pydantic import BaseModel
+from typing import List, Optional, Dict
 from dotenv import load_dotenv
-from groq import AsyncGroq, Groq
+from groq import AsyncGroq
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+class JDResponse(BaseModel):
+    job_title: Optional[str]
+    company: Optional[str]
+    seniority: str = "not_specified"
+    employment_type: str = "not_specified"
+    required_skills: List[str] = []
+    preferred_skills: List[str] = []
+    technologies: List[str] = []
+    soft_skills: List[str] = []
+    experience_required: str = "not_specified"
+    education_required: str = "not_specified"
+    keywords: List[str] = []
+    keyword_frequency: Dict[str, int] = {}
+    must_have_phrases: List[str] = []
+    red_flags_if_missing: List[str] = []
+    responsibilities: List[str] = []
+    industry_context: Optional[str]
+    
+    
 # ── Config constants ──────────────────────────────────────────
 MODEL        = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 TEMPERATURE  = float(os.getenv("JD_TEMPERATURE", "0.05"))
 MAX_TOKENS   = int(os.getenv("JD_MAX_TOKENS", "2000"))
 JD_MAX_CHARS = 6000   # ~1500 tokens, leaves room for prompt + response
+MAX_RETRIES = 3
 
 # ── Default structure — returned when parsing fails ───────────
 DEFAULT = {
@@ -74,7 +95,7 @@ Rules:
 _client = None  # Lazy init on first use
 
 # ── Lazy client init ──────────────────────────────────────────
-def _get_client() -> Groq:
+def _get_client():
     global _client
     if _client is None:
         api_key = os.getenv("GROQ_API_KEY")
@@ -105,23 +126,34 @@ def _extract_json_from_llm_output(s: str) -> str:
 
 # ── Shape validator ───────────────────────────────────────────
 def _validate(data: dict) -> dict:
-    """Merge parsed data into defaults so all keys always exist."""
     validated = {**DEFAULT, **data}
     
-    #ensure lists
-    for key in ["required_skills", "preferred_skills", "technologies", "soft_skills", "keywords", "must_have_phrases", "red_flags_if_missing", "responsibilities"]:
-        if not isinstance(validated[key], list):
+    # Ensure list fields
+    for key in [
+        "required_skills", "preferred_skills", "technologies",
+        "soft_skills", "keywords", "must_have_phrases",
+        "red_flags_if_missing", "responsibilities"
+    ]:
+        if not isinstance(validated.get(key), list):
             validated[key] = []
-            
-    #ensure dict
-    if not isinstance(validated["keyword_frequency"], dict):
+
+    # Ensure dict
+    if not isinstance(validated.get("keyword_frequency"), dict):
         validated["keyword_frequency"] = {}
-                
+    
+    #depulicate logic
+    seen = set()
+    validated["all_keywords"]  = [
+        x for x in validated["all_keywords"]
+        if not (x in seen or seen.add(x))  # deduplicate while preserving order
+    ]          
     return validated
 
 
 # ── Main function ─────────────────────────────────────────────
 async def parse_jd(text: str) -> dict:
+    client = _get_client()
+    truncated_text = text[:JD_MAX_CHARS]
     """
     Parse a job description and extract structured requirements.
 
@@ -133,32 +165,37 @@ async def parse_jd(text: str) -> dict:
         technologies, keywords, red_flags_if_missing, and more.
         Always returns a complete dict — missing fields use defaults.
     """
-    try:
-        client = _get_client()
-        truncated_text = text[:JD_MAX_CHARS]
-        resp = await client.chat.completions.create(
-            model=MODEL,
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-            messages=[
-                {"role": "system", "content": SYSTEM},
-                {"role": "user",   "content": f"Parse this job description:\n\n{truncated_text}"}
-            ]
-        )
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = await client.chat.completions.create(
+                model=MODEL,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+                messages=[
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user",   "content": f"Parse this job description:\n\n{truncated_text}"}
+                ]
+            )
 
-        raw = resp.choices[0].message.content.strip()
-        raw = _extract_json_from_llm_output(raw)
-        parsed = json.loads(raw)
-        return _validate(parsed)
+            raw = resp.choices[0].message.content.strip()
+            raw = _extract_json_from_llm_output(raw)
+            parsed = json.loads(raw)
+            validated = JDResponse(**parsed)  # Pydantic validation
+            if not parsed.keywords:
+                raise ValueError("Invalid response structure")
+            return _validate(validated.model_dump())
 
-    except json.JSONDecodeError as e:
-        logger.error(f"[jd_parser] JSON parse failed: {e}")
-        logger.debug(f"[jd_parser] Raw output: {raw[:500]}")
-        return _validate({})
+        except json.JSONDecodeError as e:
+            logger.warning(f"[jd_parser] Attempt {attempt +1} JSON failed: {e}")
 
-    except Exception as e:
-        logger.error(f"[jd_parser] Unexpected error: {e}")
-        return _validate({})
+        except Exception as e:
+            logger.warning(f"[jd_parser] Attempt {attempt +1} failed: {e}")
+            
+        if attempt < MAX_RETRIES - 1:
+            await asyncio.sleep(1)  # brief pause before retrying
+        
+    logger.error("[jd_parser] All attempts failed")
+    return _validate({})         
 
 
 # ── Test ──────────────────────────────────────────────────────
