@@ -3,13 +3,53 @@ agents/gap_analyzer.py  —  AGENT 3
 Compares resume vs JD → match score, gaps, quick wins.
 Model: Groq Llama-3.3-70b (free)
 """
-import json, os
-from groq import Groq
+import json, os, asyncio, random
+from groq import AsyncGroq
 from dotenv import load_dotenv
+import logging
+from pydantic import BaseModel, Field
+from typing import List, Dict
+import hashlib
 
 load_dotenv()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_client = None
+logger = logging.getLogger(__name__)
+_cache = {}
 
+class SectionScores(BaseModel):
+    skills_match: int = 0
+    experience_match: int = 0
+    education_match: int = 0
+    keywords_match: int = 0
+    format_score: int = 0
+
+class GapResponse(BaseModel):
+    overall_score: int = 0
+    section_scores: SectionScores = Field(default_factory=SectionScores)
+    missing_keywords: List[Dict] = Field(default_factory=list)
+    present_keywords: List[str] = Field(default_factory=list)
+    format_issues: List[str] = Field(default_factory=list)
+    quick_wins: List[Dict] = Field(default_factory=list)
+    strengths: List[str] = Field(default_factory=list)
+    honest_assessment: str = ""
+    score_to_reach_75_percent: List[str] = Field(default_factory=list)
+
+def _get_client():
+    global _client
+    if _client is None:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY is missing")
+        _client = AsyncGroq(api_key=api_key)
+    return _client
+  
+#constants
+MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+TEMPERATURE = float(os.getenv("GAP_TEMPERATURE", "0.15"))
+MAX_TOKENS = int(os.getenv("GAP_MAX_TOKENS", "2800"))
+MAX_RETRIES = 3
+BASE_DELAY = 1      
+          
 # ════════════════════════════════════════════════════════════
 #  PROMPT  — The most important prompt in the whole app
 # ════════════════════════════════════════════════════════════
@@ -97,7 +137,60 @@ Scoring rules:
 - honest_assessment: speak like a mentor, name specifics, don't pad
 """
 
+def _make_cache_key(resume: dict, jd: dict) -> str:
+    raw = json.dumps({"r": resume, "j": jd}, sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()
+  
+def _fallback_analysis(resume, jd):
+    resume_keywords = set(map(str.lower, resume.get("all_keywords", [])))
+    jd_keywords = set(map(str.lower, jd.get("keywords", [])))
+
+    matched = resume_keywords & jd_keywords
+    score = int((len(matched) / (len(jd_keywords) or 1)) * 100)
+
+    return {
+        "overall_score": score,
+        "section_scores": {
+          "skills_match": 0,
+          "experience_match": 0,
+          "education_match": 0,
+          "keywords_match": score,
+          "format_score": 0
+          },
+        "missing_keywords": list(jd_keywords - resume_keywords),
+        "present_keywords": list(matched),
+        "format_issues": [],
+        "quick_wins": [],
+        "strengths": [],
+        "honest_assessment": "Fallback analysis used due to LLM failure.",
+        "score_to_reach_75_percent": []
+    }
+
+def _extract_json(s: str) -> str:
+    if not s:
+      return ""
+    
+    if "```" in s:
+        parts = s.split("```")
+        for part in parts:
+          if '{' in part and '}' in part:
+            s = part
+            break
+    start = s.find("{")
+    end = s.rfind("}")      
+    if start != -1 and end != -1:
+        return s[start:end + 1] 
+
+    return s.strip()     
+
 async def analyze_gaps(resume: dict, jd: dict) -> dict:
+    client = _get_client()
+    cache_key = _make_cache_key(resume, jd)
+
+    if cache_key in _cache:
+        logger.info("[gap_analyzer] cache hit")
+        return _cache[cache_key]
+    
     # Trim payload to save tokens
     r = {
         "skills":       resume.get("skills", []),
@@ -119,33 +212,62 @@ async def analyze_gaps(resume: dict, jd: dict) -> dict:
         "must_have_phrases":     jd.get("must_have_phrases", []),
     }
 
-    try:
-        resp = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            temperature=0.15,
-            max_tokens=2800,
-            messages=[
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content":
-                    f"RESUME DATA:\n{json.dumps(r, indent=2)}\n\n"
-                    f"JD DATA:\n{json.dumps(j, indent=2)}\n\n"
-                    "Produce the gap analysis JSON."}
-            ]
-        )
-        raw = resp.choices[0].message.content.strip()
-        raw = _clean(raw)
-        data = json.loads(raw)
-        data["overall_score"] = max(0, min(100, int(data.get("overall_score", 0))))
-        return data
-    except Exception as e:
-        print(f"[gap_analyzer] {e}")
-        return {"overall_score": 0, "section_scores": {}, "missing_keywords": [],
-                "present_keywords": [], "format_issues": [], "quick_wins": [],
-                "honest_assessment": "Analysis failed. Please try again.", "strengths": []}
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = await client.chat.completions.create(
+                model=MODEL,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+                messages=[
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content":
+                        f"RESUME DATA:\n{json.dumps(r)}\n\n"
+                        f"JD DATA:\n{json.dumps(j)}\n\n"
+                        "Produce the gap analysis JSON."}
+                ],
+                timeout=20
+            )
 
-def _clean(s: str) -> str:
-    if "```" in s:
-        s = s.split("```")[1]
-        if s.startswith("json"):
-            s = s[4:]
-    return s.strip()
+            raw = resp.choices[0].message.content.strip()
+            raw = _extract_json(raw)
+            parsed = json.loads(raw)
+
+            # Schema validation
+            validated = GapResponse(**parsed)
+
+            result = validated.model_dump()
+
+            #Safety clamp
+            result["overall_score"] = max(0, min(100, int(result.get("overall_score", 0))))
+
+            #Meta info
+            result["_meta"] = {
+                "attempts": attempt + 1,
+                "parser": "gap_analyzer_v2"
+            }
+
+            return result
+        except json.JSONDecodeError:
+          logger.warning("[gap_analyzer] JSON parse failed")
+
+        except asyncio.TimeoutError:
+            logger.warning("[gap_analyzer] Timeout")
+            
+        except Exception as e:
+            logger.warning("[gap_analyzer] attempt=%d error=%s", attempt+1, str(e))
+
+        # Backoff retry
+        if attempt < MAX_RETRIES - 1:
+            await asyncio.sleep(BASE_DELAY * (2 ** attempt) + random.uniform(0, 1))        
+
+    #Fallback (ONLY after all retries fail)
+    logger.error("[gap_analyzer] All attempts failed — using fallback")
+
+    result = _fallback_analysis(resume, jd)
+    result["_meta"] = {
+        "attempts": MAX_RETRIES,
+        "parser": "gap_analyzer_v2",
+        "status": "fallback_used"
+    }
+    _cache[cache_key] = result
+    return result
