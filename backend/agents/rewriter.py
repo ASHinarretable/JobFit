@@ -3,7 +3,8 @@ agents/rewriter.py  —  AGENT 4
 Rewrites weak resume bullets to include JD keywords naturally.
 Uses Gemini Flash first (free, high quality), falls back to Groq automatically.
 """
-import json, os
+import json, os, re, asyncio
+from collections import Counter
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -50,40 +51,133 @@ STRICT RULES:
 - For students: project work counts as experience — treat it seriously
 - Return ONLY the JSON object, no other text
 """
+# ════════════════════════════════════════════════════════════
+# UTIL: TEXT NORMALIZATION
+# ════════════════════════════════════════════════════════════
+def normalize(text: str):
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.split()
 
+# ════════════════════════════════════════════════════════════
+# IMPROVED KEYWORD CLASSIFICATION
+# ════════════════════════════════════════════════════════════
 def classify_keywords(keywords: list) -> dict:
+    """
+    Heuristic:
+    - Keywords appearing more frequently → must-have
+    """
     must_have = []
     nice_to_have = []
     
+    explicit_markers = ["must_have", "required", "mandatory"]
+    # step 1: detect explicit priority
+    cleaned_keywords = []
     for kw in keywords:
         kw_lower = kw.lower()
-        if any(x in kw_lower for x in ["must have", "required", "mandatory"]):
+        if any(marker in kw_lower for marker in explicit_markers):
+            #remove marker text to keep clean keywords
+            clean_kw = kw_lower
+            for marker in explicit_markers:
+                clean_kw = clean_kw.replace(marker,"").strip(" :-")
+            must_have.add(clean_kw)
+            cleaned_keywords.append(clean_kw)
+        else:            cleaned_keywords.append(kw_lower)
+        
+    # step 2: frequency - based fallback
+    freq = Counter(cleaned_keywords)
+    
+    for kw, count in freq.items():
+        if kw in must_have:
+            continue
+        elif count > 1:
             must_have.append(kw)
         else:
-            nice_to_have.append(kw)
+            nice_to_have.append(kw)        
+                
             
     return {
-        "must_have": must_have,
-        "nice_to_have": nice_to_have
+        "must_have": list(must_have),
+        "nice_to_have": list(nice_to_have)
     }
+
+# ════════════════════════════════════════════════════════════
+# IMPROVED SCORING
+# ════════════════════════════════════════════════════════════   
+def keyword_match_score(text: str, keywords: list):
+    tokens = normalize(text)
+    token_str = " ".join(tokens)
+    matched = []
     
+    for kw in keywords:
+        kw_norm = " ".join(normalize(kw))
+        
+        if kw_norm in token_str:
+            matched.append(kw)
+    return matched
+         
 def compute_keyword_score(text:str, keyword_groups: dict) -> dict:
-    score = 0
+
     used = []
-    for kw in keyword_groups["must_have"]:
-        if kw.lower() in text.lower():
-            score += 3
-            used.append(kw)
-    for kw in keyword_groups["nice_to_have"]:
-        if kw.lower() in text.lower():
-            score += 1
-            used.append(kw)
-                    
+    
+    must = keyword_match_score(text, keyword_groups["must_have"])
+    nice = keyword_match_score(text, keyword_groups["nice_to_have"])
+    used.extend(must)
+    used.extend(nice)
+    
+    score = len(must) * 3 + len(nice) * 1
+                        
     return {
         "score": score,
         "used_keywords": used
     }
-                    
+ 
+# ════════════════════════════════════════════════════════════
+# JSON CLEANING (ROBUST)
+# ════════════════════════════════════════════════════════════
+def _clean(s: str) -> str:
+    if not s:
+        return "{}"
+    
+    if "```" in s:
+        s = re.sub(r"```(json)?", "", s)
+        
+    #extract json object
+    match = re.search(r"\{.*\}", s, re.DOTALL)
+    if match:
+        return match.group(0)    
+    return s.strip()         
+ 
+# ════════════════════════════════════════════════════════════
+# HALLUCINATION GUARD
+# ════════════════════════════════════════════════════════════
+def validate_output(data, original_bullets):
+    original_text = " ".join(original_bullets).lower()
+    for item in data.get("suggestions", []):
+        rewritten = item.get("rewritten", "").lower()
+        
+        #avoid unrelated content
+        if len(rewritten) > 0 and not any( word in original_text for word in rewritten.split()[:3]):
+            item["warning"] = "Possibly hallucinating content detected"
+    return data
+ 
+# ════════════════════════════════════════════════════════════
+# RETRY WRAPPER
+# ════════════════════════════════════════════════════════════
+async def retry_call(fn, retries=3, delay=1):
+    last_error = None
+    for i in range(retries):
+        try:
+            return await fn()
+        except Exception as e:
+            last_error = e
+            await asyncio.sleep(delay * (2 ** i))
+    raise last_error
+ 
+# ════════════════════════════════════════════════════════════
+# MAIN FUNCTION
+# ════════════════════════════════════════════════════════════                        
 async def rewrite_bullets(bullets: list, keywords: list) -> dict:
     if not bullets:
         return {"suggestions": [], "summary": "", "extra_bullets": []}
@@ -106,53 +200,60 @@ async def rewrite_bullets(bullets: list, keywords: list) -> dict:
     - Do NOT force keywords unnaturally
     Rewrite and return JSON.
     """
-    def enrich_scores(data, keyword_groups):
+    def enrich(data, keyword_groups):
             for item in data.get("suggestions", []):
                 score_info = compute_keyword_score(item.get("rewritten", ""), keyword_groups)
                 item["keyword_score"] = score_info["score"]
                 item["keywords_detected"] = score_info["used_keywords"]
             return data
-    try:
+    # ───────── GROQ ─────────
+    async def call_groq():
         from groq import AsyncGroq
+
         g = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+
         resp = await g.chat.completions.create(
             model="llama-3.3-70b-versatile",
             temperature=0.4,
             max_tokens=1800,
             messages=[
                 {"role": "system", "content": SYSTEM},
-                {"role": "user", "content":user_message}
+                {"role": "user", "content": user_message}
             ]
         )
-        raw = resp.choices[0].message.content.strip()
-        data = json.loads(_clean(raw))
-        return enrich_scores(data, keyword_groups)
 
-    except Exception as e:
-        print(f"[rewriter] Groq failed ({e}), trying Gemini...")
-    
-    # ── Fallback: Gemini ───────────────────────────────────────
+        raw = resp.choices[0].message.content
+        return json.loads(_clean(raw))
+
+    try:
+        data = await retry_call(call_groq)
+        return validate_output(enrich(data), bullets)
+
+    except Exception as groq_error:
+        print(f"[rewriter] Groq failed: {groq_error}")
+
+    # ───────── GEMINI FALLBACK ─────────
     try:
         import google.generativeai as genai
+    except ImportError:
+        raise RuntimeError("Gemini SDK not installed")
 
+    async def call_gemini():
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
         model = genai.GenerativeModel(
             model_name="gemini-1.5-flash",
             system_instruction=SYSTEM
         )
 
         resp = model.generate_content(user_message)
-        raw = resp.text.strip()
-        data = json.loads(_clean(raw))
-        return enrich_scores(data, keyword_groups)
-    #we're not catching this error because if both fail, we want to see the raw response to debug why the LLMs are not returning valid JSON     
-    except Exception as e:
-        print("RAW RESPONSE:", locals().get("raw"))
-    raise e
+        return json.loads(_clean(resp.text))
 
-def _clean(s: str) -> str:
-    if "```" in s:
-        s = s.split("```")[1]
-        if s.startswith("json"):
-            s = s[4:]
-    return s.strip()
+    try:
+        data = await retry_call(call_gemini)
+        return validate_output(enrich(data), bullets)
+
+    except Exception as gemini_error:
+        raise RuntimeError(
+            f"Both Groq and Gemini failed.\nGroq: {groq_error}\nGemini: {gemini_error}"
+        )
