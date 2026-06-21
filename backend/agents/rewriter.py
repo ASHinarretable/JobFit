@@ -68,34 +68,26 @@ def classify_keywords(keywords: list) -> dict:
     Heuristic:
     - Keywords appearing more frequently → must-have
     """
-    must_have = []
-    nice_to_have = []
-    
+    priority_score = {}
     explicit_markers = ["must_have", "required", "mandatory"]
-    # step 1: detect explicit priority
-    cleaned_keywords = []
     for kw in keywords:
         kw_lower = kw.lower()
+
+        score = 0
+
         if any(marker in kw_lower for marker in explicit_markers):
-            #remove marker text to keep clean keywords
-            clean_kw = kw_lower
-            for marker in explicit_markers:
-                clean_kw = clean_kw.replace(marker,"").strip(" :-")
-            must_have.add(clean_kw)
-            cleaned_keywords.append(clean_kw)
-        else:            cleaned_keywords.append(kw_lower)
-        
-    # step 2: frequency - based fallback
-    freq = Counter(cleaned_keywords)
-    
-    for kw, count in freq.items():
-        if kw in must_have:
-            continue
-        elif count > 1:
-            must_have.append(kw)
-        else:
-            nice_to_have.append(kw)        
-                
+            score += 3
+
+        score += keywords.count(kw)  # frequency boost
+
+        clean_kw = kw_lower
+        for marker in explicit_markers:
+            clean_kw = clean_kw.replace(marker, "").strip(" :-")
+
+        priority_score[clean_kw] = priority_score.get(clean_kw, 0) + score
+
+    must_have = [k for k, v in priority_score.items() if v >= 3]
+    nice_to_have = [k for k, v in priority_score.items() if v < 3]
             
     return {
         "must_have": list(must_have),
