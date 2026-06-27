@@ -1,0 +1,186 @@
+{
+  "name": "ResumeRadar — ATS Analyzer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "analyze-resume",
+        "responseMode": "responseNode",
+        "options": { "rawBody": false }
+      },
+      "id": "node-webhook",
+      "name": "1. Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [160, 300],
+      "notes": "POST /webhook/analyze-resume with body: { resume_text, job_description }"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GROQ_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.05,\n  \"max_tokens\": 2000,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a resume parser. Extract structured data and return ONLY a JSON object with these fields: skills (array), experience_bullets (array), all_keywords (array), education (array), certifications (array), has_summary (bool), format_flags (object with has_tables bool, has_columns bool). No markdown fences, no explanation.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Parse this resume:\\n\\n{{ $json.body.resume_text }}\"\n    }\n  ]\n}"
+      },
+      "id": "node-agent1",
+      "name": "2. Agent 1 — Resume Parser",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [400, 180],
+      "notes": "Calls Groq to extract structured resume data."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GROQ_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.05,\n  \"max_tokens\": 2000,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a JD parser. Extract what the employer wants and return ONLY a JSON object with: required_skills (array), preferred_skills (array), technologies (array), keywords (comprehensive array), red_flags_if_missing (array of 3-5 critical skills), experience_required (string), seniority (string). No markdown fences, no explanation.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Parse this job description:\\n\\n{{ $('1. Webhook Trigger').item.json.body.job_description }}\"\n    }\n  ]\n}"
+      },
+      "id": "node-agent2",
+      "name": "3. Agent 2 — JD Parser",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [400, 420],
+      "notes": "Runs in parallel with Agent 1. Extracts JD requirements."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge outputs from Agent 1 and Agent 2 into one object\nconst items = $input.all();\n\nfunction parseGroqResponse(item) {\n  try {\n    let text = item.json.choices[0].message.content.trim();\n    // Strip markdown fences if present\n    if (text.startsWith('```')) {\n      text = text.split('```')[1];\n      if (text.startsWith('json')) text = text.slice(4);\n    }\n    return JSON.parse(text.trim());\n  } catch(e) {\n    console.log('Parse error:', e.message);\n    return {};\n  }\n}\n\nconst resumeData = parseGroqResponse(items[0]);\nconst jdData     = parseGroqResponse(items[1]);\n\nreturn [{\n  json: {\n    resume_skills:    resumeData.skills || [],\n    resume_keywords:  resumeData.all_keywords || [],\n    resume_bullets:   (resumeData.experience_bullets || []).slice(0, 5),\n    resume_education: resumeData.education || [],\n    resume_format:    resumeData.format_flags || {},\n    has_summary:      resumeData.has_summary || false,\n    jd_required:      jdData.required_skills || [],\n    jd_preferred:     jdData.preferred_skills || [],\n    jd_technologies:  jdData.technologies || [],\n    jd_keywords:      (jdData.keywords || []).slice(0, 35),\n    jd_red_flags:     jdData.red_flags_if_missing || [],\n    jd_experience:    jdData.experience_required || '',\n    jd_seniority:     jdData.seniority || ''\n  }\n}];"
+      },
+      "id": "node-merge",
+      "name": "4. Merge Outputs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300],
+      "notes": "Combines parsed resume + JD into one payload for analysis agents."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GROQ_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.15,\n  \"max_tokens\": 2500,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an ATS expert and brutally honest career coach. Compare resume vs JD and return ONLY a JSON object with: overall_score (0-100 integer, be honest), section_scores (object with skills_match/experience_match/education_match/keywords_match/format_score all 0-100), missing_keywords (array of {keyword, importance: critical|important|nice-to-have, frequency_in_jd, suggested_placement}), present_keywords (array), quick_wins (array of top 3 {action, impact, effort}), honest_assessment (2-3 sentence string), strengths (array), score_to_reach_75_percent (array), format_issues (array). No markdown, no explanation.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"RESUME:\\nSkills: {{ JSON.stringify($json.resume_skills) }}\\nKeywords: {{ JSON.stringify($json.resume_keywords) }}\\nEducation: {{ JSON.stringify($json.resume_education) }}\\nHas summary: {{ $json.has_summary }}\\nFormat: {{ JSON.stringify($json.resume_format) }}\\n\\nJOB DESCRIPTION:\\nRequired: {{ JSON.stringify($json.jd_required) }}\\nTechnologies: {{ JSON.stringify($json.jd_technologies) }}\\nKeywords: {{ JSON.stringify($json.jd_keywords) }}\\nRed flags: {{ JSON.stringify($json.jd_red_flags) }}\\nSeniority: {{ $json.jd_seniority }}\\nExperience: {{ $json.jd_experience }}\\n\\nProduce the gap analysis JSON.\"\n    }\n  ]\n}"
+      },
+      "id": "node-agent3",
+      "name": "5. Agent 3 — Gap Analyzer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [920, 180],
+      "notes": "The scoring heart. Returns match score, gaps, quick wins."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GROQ_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.4,\n  \"max_tokens\": 1800,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert resume writer. Rewrite the given bullets to naturally include JD keywords. Use strong action verbs, add quantified impact, follow STAR format. Never fabricate skills. Return ONLY a JSON object with: suggestions (array of {original, rewritten, keywords_added, improvement_note}), summary (2-sentence profile summary string). No markdown.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"BULLETS TO REWRITE:\\n{{ JSON.stringify($('4. Merge Outputs').item.json.resume_bullets) }}\\n\\nJD KEYWORDS TO WEAVE IN:\\n{{ JSON.stringify($('4. Merge Outputs').item.json.jd_keywords.slice(0,15)) }}\\n\\nReturn the rewrite JSON.\"\n    }\n  ]\n}"
+      },
+      "id": "node-agent4",
+      "name": "6. Agent 4 — Rewriter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [920, 420],
+      "notes": "Rewrites bullet points with missing keywords woven in naturally."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assemble final API response from agents 3 and 4\nfunction parseGroq(item) {\n  try {\n    let text = item.json.choices[0].message.content.trim();\n    if (text.startsWith('```')) {\n      text = text.split('```')[1];\n      if (text.startsWith('json')) text = text.slice(4);\n    }\n    return JSON.parse(text.trim());\n  } catch(e) {\n    return {};\n  }\n}\n\nconst gap     = parseGroq($('5. Agent 3 — Gap Analyzer').first());\nconst rewrite = parseGroq($('6. Agent 4 — Rewriter').first());\n\nconst score = Math.max(0, Math.min(100, parseInt(gap.overall_score || 0)));\n\nreturn [{\n  json: {\n    match_score:       score,\n    section_scores:    gap.section_scores || {},\n    missing_keywords:  gap.missing_keywords || [],\n    present_keywords:  gap.present_keywords || [],\n    format_issues:     gap.format_issues || [],\n    quick_wins:        gap.quick_wins || [],\n    honest_assessment: gap.honest_assessment || '',\n    strengths:         gap.strengths || [],\n    score_to_75:       gap.score_to_reach_75_percent || [],\n    rewritten_bullets: rewrite.suggestions || [],\n    summary_suggestion: rewrite.summary || ''\n  }\n}];"
+      },
+      "id": "node-assembler",
+      "name": "7. Assemble Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1180, 300],
+      "notes": "Merges gap analysis + rewrites into the final JSON response."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Content-Type", "value": "application/json" },
+              { "name": "Access-Control-Allow-Origin", "value": "*" }
+            ]
+          }
+        }
+      },
+      "id": "node-respond",
+      "name": "8. Send Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1420, 300],
+      "notes": "Returns the complete analysis to the frontend."
+    }
+  ],
+  "connections": {
+    "1. Webhook Trigger": {
+      "main": [[
+        { "node": "2. Agent 1 — Resume Parser", "type": "main", "index": 0 },
+        { "node": "3. Agent 2 — JD Parser",    "type": "main", "index": 0 }
+      ]]
+    },
+    "2. Agent 1 — Resume Parser": {
+      "main": [[{ "node": "4. Merge Outputs", "type": "main", "index": 0 }]]
+    },
+    "3. Agent 2 — JD Parser": {
+      "main": [[{ "node": "4. Merge Outputs", "type": "main", "index": 1 }]]
+    },
+    "4. Merge Outputs": {
+      "main": [[
+        { "node": "5. Agent 3 — Gap Analyzer", "type": "main", "index": 0 },
+        { "node": "6. Agent 4 — Rewriter",     "type": "main", "index": 0 }
+      ]]
+    },
+    "5. Agent 3 — Gap Analyzer": {
+      "main": [[{ "node": "7. Assemble Response", "type": "main", "index": 0 }]]
+    },
+    "6. Agent 4 — Rewriter": {
+      "main": [[{ "node": "7. Assemble Response", "type": "main", "index": 1 }]]
+    },
+    "7. Assemble Response": {
+      "main": [[{ "node": "8. Send Response", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "_readme": "SETUP INSTRUCTIONS: 1) Import this file into n8n via Settings → Import. 2) In n8n, go to Settings → Environment Variables, add GROQ_API_KEY = your key from console.groq.com. 3) Activate the workflow. 4) Your endpoint is: POST http://localhost:5678/webhook/analyze-resume with JSON body { resume_text: '...', job_description: '...' }. 5) To use this instead of the FastAPI backend, change VITE_API_URL in the frontend .env to the n8n webhook URL."
+}

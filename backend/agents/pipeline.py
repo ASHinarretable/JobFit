@@ -5,10 +5,10 @@
 # No server, no frontend — pure Python. 
 
 import json
-from resume_parser import parse_resume
-from jd_parser import parse_jd
-from gap_analyzer import analyze_gaps
-from rewriter import rewrite_bullets
+from agents.resume_parser import parse_resume
+from agents.jd_parser import parse_jd
+from agents.gap_analyzer import analyze_gaps
+from agents.rewriter import rewrite_bullets
 import asyncio
 
 

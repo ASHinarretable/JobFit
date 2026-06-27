@@ -4,15 +4,14 @@ Compares resume vs JD → match score, gaps, quick wins.
 Model: Groq Llama-3.3-70b (free)
 """
 import json, os, asyncio, random
-from groq import AsyncGroq
 from dotenv import load_dotenv
 import logging
 from pydantic import BaseModel, Field
 from typing import List, Dict
 import hashlib
-
+from utils.json_utils import extract_json
+from utils.llm_client import get_client
 load_dotenv()
-_client = None
 logger = logging.getLogger(__name__)
 _cache = {}
 
@@ -33,22 +32,14 @@ class GapResponse(BaseModel):
     strengths: List[str] = Field(default_factory=list)
     honest_assessment: str = ""
     score_to_reach_75_percent: List[str] = Field(default_factory=list)
-
-def _get_client():
-    global _client
-    if _client is None:
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY is missing")
-        _client = AsyncGroq(api_key=api_key)
-    return _client
-  
+ 
 #constants
 MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 TEMPERATURE = float(os.getenv("GAP_TEMPERATURE", "0.15"))
 MAX_TOKENS = int(os.getenv("GAP_MAX_TOKENS", "2800"))
 MAX_RETRIES = 3
-BASE_DELAY = 1      
+BASE_DELAY = 1
+CACHE_MAX_SIZE = 500   # bound the in-memory cache
           
 # ════════════════════════════════════════════════════════════
 #  PROMPT  — The most important prompt in the whole app
@@ -166,25 +157,8 @@ def _fallback_analysis(resume, jd):
         "score_to_reach_75_percent": []
     }
 
-def _extract_json(s: str) -> str:
-    if not s:
-      return ""
-    
-    if "```" in s:
-        parts = s.split("```")
-        for part in parts:
-          if '{' in part and '}' in part:
-            s = part
-            break
-    start = s.find("{")
-    end = s.rfind("}")      
-    if start != -1 and end != -1:
-        return s[start:end + 1] 
-
-    return s.strip()     
-
 async def analyze_gaps(resume: dict, jd: dict) -> dict:
-    client = _get_client()
+    client = get_client()
     cache_key = _make_cache_key(resume, jd)
 
     if cache_key in _cache:
@@ -218,6 +192,7 @@ async def analyze_gaps(resume: dict, jd: dict) -> dict:
                 model=MODEL,
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,
+                response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content":
@@ -229,8 +204,7 @@ async def analyze_gaps(resume: dict, jd: dict) -> dict:
             )
 
             raw = resp.choices[0].message.content.strip()
-            raw = _extract_json(raw)
-            parsed = json.loads(raw)
+            parsed = extract_json(raw)
 
             # Schema validation
             validated = GapResponse(**parsed)
@@ -245,6 +219,10 @@ async def analyze_gaps(resume: dict, jd: dict) -> dict:
                 "attempts": attempt + 1,
                 "parser": "gap_analyzer_v2"
             }
+
+            # Cache successful results only (bounded to avoid unbounded growth)
+            if len(_cache) < CACHE_MAX_SIZE:
+                _cache[cache_key] = result
 
             return result
         except json.JSONDecodeError:
@@ -269,5 +247,5 @@ async def analyze_gaps(resume: dict, jd: dict) -> dict:
         "parser": "gap_analyzer_v2",
         "status": "fallback_used"
     }
-    _cache[cache_key] = result
+    # Do NOT cache fallback results — the LLM may recover on the next request.
     return result

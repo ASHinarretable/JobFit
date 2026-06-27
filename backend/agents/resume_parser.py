@@ -3,21 +3,18 @@ agents/resume_parser.py  —  AGENT 1
 Reads raw resume text → returns structured JSON.
 Model: Groq Llama-3.3-70b (free)
 """
-import json, os, asyncio, logging, re
-from groq import AsyncGroq
+import os, asyncio, logging
+import random, time, hashlib
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
-import random
-import time
-import hashlib
+from utils.json_utils import extract_json
+from utils.llm_client import get_client
 load_dotenv()
 logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 MAX_CHARS = 6000
 BASE_DELAY = 1
-
-_client = None
 class ResumeResponse(BaseModel):
   name : Optional[str]
   contact: Dict[str, Optional[str]] = Field(default_factory=dict)
@@ -97,35 +94,6 @@ Rules:
 - Do NOT hallucinate data not present in the resume.
 """
 
-def _get_client():
-    global _client
-    if _client is None:
-      api_key = os.getenv("GROQ_API_KEY")
-      if not api_key:
-        raise ValueError ("GROQ_API_KEY is missing")  
-      _client = AsyncGroq(api_key=api_key) 
-    return _client
-
-def _extract_json(s: str) -> str:
-    if not s:
-        return ""
-
-    if "```" in s:
-        parts = s.split("```")
-        for part in parts:
-            if "{" in part and "}" in part:
-                s = part
-                break
-
-    # Find first valid JSON block (balanced braces)
-    start = s.find("{")
-    end = s.rfind("}")
-    
-    if start != -1 and end != -1:
-        return s[start:end+1]
-
-    return s.strip()   
-
 def _validate(data: dict, raw_text: str) -> dict: 
     default = {
       "name": None,
@@ -196,7 +164,7 @@ def _hash_text(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()[:8]
       
 async def parse_resume(text: str) -> dict:
-    client = _get_client()
+    client = get_client()
     truncated_text = _smart_truncate(text, MAX_CHARS)
 
     start_time = time.time()   # latency tracking
@@ -209,6 +177,7 @@ async def parse_resume(text: str) -> dict:
                     model="llama-3.3-70b-versatile",
                     temperature=0.05,
                     max_tokens=2500,
+                    response_format={"type": "json_object"},
                     messages=[
                         {"role": "system", "content": SYSTEM},
                         {"role": "user", "content": f"Parse this resume:\n\n{truncated_text}"}
@@ -218,8 +187,7 @@ async def parse_resume(text: str) -> dict:
             )
 
             raw = resp.choices[0].message.content.strip()
-            raw = _extract_json(raw)
-            parsed = json.loads(raw)
+            parsed = extract_json(raw)
 
             # Pydantic validation
             validated = ResumeResponse(**parsed)

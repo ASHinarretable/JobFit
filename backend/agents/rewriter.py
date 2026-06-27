@@ -6,7 +6,8 @@ Uses Gemini Flash first (free, high quality), falls back to Groq automatically.
 import json, os, re, asyncio
 from collections import Counter
 from dotenv import load_dotenv
-
+from utils.json_utils import extract_json
+from utils.retry import retry_async
 load_dotenv()
 
 # ════════════════════════════════════════════════════════════
@@ -69,7 +70,7 @@ def classify_keywords(keywords: list) -> dict:
     - Keywords appearing more frequently → must-have
     """
     priority_score = {}
-    explicit_markers = ["must_have", "required", "mandatory"]
+    explicit_markers = ["must have", "required", "mandatory"]
     for kw in keywords:
         kw_lower = kw.lower()
 
@@ -77,8 +78,8 @@ def classify_keywords(keywords: list) -> dict:
 
         if any(marker in kw_lower for marker in explicit_markers):
             score += 3
-
-        score += keywords.count(kw)  # frequency boost
+        freq = Counter(keywords)
+        score += freq[kw]  # frequency boost
 
         clean_kw = kw_lower
         for marker in explicit_markers:
@@ -124,23 +125,7 @@ def compute_keyword_score(text:str, keyword_groups: dict) -> dict:
         "score": score,
         "used_keywords": used
     }
- 
-# ════════════════════════════════════════════════════════════
-# JSON CLEANING (ROBUST)
-# ════════════════════════════════════════════════════════════
-def _clean(s: str) -> str:
-    if not s:
-        return "{}"
-    
-    if "```" in s:
-        s = re.sub(r"```(json)?", "", s)
-        
-    #extract json object
-    match = re.search(r"\{.*\}", s, re.DOTALL)
-    if match:
-        return match.group(0)    
-    return s.strip()         
- 
+
 # ════════════════════════════════════════════════════════════
 # HALLUCINATION GUARD
 # ════════════════════════════════════════════════════════════
@@ -208,6 +193,7 @@ async def rewrite_bullets(bullets: list, keywords: list) -> dict:
             model="llama-3.3-70b-versatile",
             temperature=0.4,
             max_tokens=1800,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": user_message}
@@ -215,11 +201,11 @@ async def rewrite_bullets(bullets: list, keywords: list) -> dict:
         )
 
         raw = resp.choices[0].message.content
-        return json.loads(_clean(raw))
+        return extract_json(raw)
 
     try:
         data = await retry_call(call_groq)
-        return validate_output(enrich(data), bullets)
+        return validate_output(enrich(data, keyword_groups), bullets)
 
     except Exception as groq_error:
         print(f"[rewriter] Groq failed: {groq_error}")
@@ -239,11 +225,11 @@ async def rewrite_bullets(bullets: list, keywords: list) -> dict:
         )
 
         resp = model.generate_content(user_message)
-        return json.loads(_clean(resp.text))
+        return extract_json(resp.text)
 
     try:
         data = await retry_call(call_gemini)
-        return validate_output(enrich(data), bullets)
+        return validate_output(enrich(data, keyword_groups), bullets)
 
     except Exception as gemini_error:
         raise RuntimeError(

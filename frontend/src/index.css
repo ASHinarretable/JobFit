@@ -1,0 +1,57 @@
+/* ResumeRadar — Global Styles
+   Aesthetic: Editorial dark. Newspaper grid meets terminal.
+   Fonts: Syne (display) + DM Mono (data/code)
+*/
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #0a0a0f;
+  --surface:   #111118;
+  --surface2:  #1a1a24;
+  --border:    #2a2a3a;
+  --border2:   #3a3a4e;
+  --text:      #e8e8f0;
+  --muted:     #7070a0;
+  --accent:    #6affb4;  /* mint green — unusual, memorable */
+  --accent2:   #a78bfa;  /* soft violet for secondary */
+  --warn:      #fbbf24;
+  --danger:    #f87171;
+  --font-head: 'Syne', system-ui, sans-serif;
+  --font-mono: 'DM Mono', 'Fira Code', monospace;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-head);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  /* subtle noise texture */
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+}
+
+button { font-family: var(--font-head); cursor: pointer; }
+textarea, input { font-family: var(--font-mono); }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* Keyframes */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse { 0%,100%{opacity:.2} 50%{opacity:1} }
+@keyframes spin   { to { transform: rotate(360deg); } }
+@keyframes drawLine {
+  from { stroke-dashoffset: 400; }
+  to   { stroke-dashoffset: 0; }
+}
+
+.fade-up { animation: fadeUp 0.5s ease both; }

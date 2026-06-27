@@ -10,8 +10,8 @@ import re, asyncio
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 from dotenv import load_dotenv
-from groq import AsyncGroq
-
+from utils.json_utils import extract_json
+from utils.llm_client import get_client
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -45,14 +45,14 @@ MAX_RETRIES = 3
 DEFAULT = {
     "job_title":             None,
     "company":               None,
-    "seniority":             "not specified",
-    "employment_type":       "not specified",
+    "seniority":             "not_specified",
+    "employment_type":       "not_specified",
     "required_skills":       [],
     "preferred_skills":      [],
     "technologies":          [],
     "soft_skills":           [],
-    "experience_required":   "not specified",
-    "education_required":    "not specified",
+    "experience_required":   "not_specified",
+    "education_required":    "not_specified",
     "keywords":              [],
     "keyword_frequency":     {},
     "must_have_phrases":     [],
@@ -77,8 +77,8 @@ Return ONLY a valid JSON object — no markdown, no explanation:
   "preferred_skills": ["skills labeled preferred / nice-to-have / bonus"],
   "technologies": ["every specific tool, language, framework, cloud, platform"],
   "soft_skills": ["communication", "teamwork",etc.],
-  "experience_required": "e.g. 0-1 years / 2+ years / fresher / not specified",
-  "education_required": "e.g. B.Tech CS / Any degree / not specified",
+  "experience_required": "e.g. 0-1 years / 2+ years / fresher /  not_specified",
+  "education_required": "e.g. B.Tech CS / Any degree /  not_specified",
   "keywords": ["COMPREHENSIVE list — every technical term an ATS would scan for.  Include synonyms: e.g. both 'REST' and 'REST API' and 'RESTful'"],
   "keyword_frequency": { "Python": 4, "Docker": 2 },
   "must_have_phrases": ["exact phrases from the JD that should appear on a resume"],
@@ -92,37 +92,6 @@ Rules:
 - keywords must be exhaustive — this is what gets compared against the resume.
 - red_flags_if_missing: only truly non-negotiable skills.
 """
-_client = None  # Lazy init on first use
-
-# ── Lazy client init ──────────────────────────────────────────
-def _get_client():
-    global _client
-    if _client is None:
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY not found. Check your .env file.")
-        _client = AsyncGroq(api_key=api_key)
-    return _client
-
-
-# ── JSON cleaner ──────────────────────────────────────────────
-def _extract_json_from_llm_output(s: str) -> str:
-    if not s:
-        return ""
-    """Strip markdown fences and extract the first valid JSON object."""
-    if "```" in s:
-        parts = s.split("```")
-        for part in parts:
-            if "{" in part and "}" in part:
-                s = part
-                break
-
-    # No fences — extract first { ... } block directly
-    match = re.search(r'\{.*\}', s, re.DOTALL)
-    return match.group() if match else s.strip()
-
-    return s.strip()
-
 
 # ── Shape validator ───────────────────────────────────────────
 def _validate(data: dict) -> dict:
@@ -141,18 +110,18 @@ def _validate(data: dict) -> dict:
     if not isinstance(validated.get("keyword_frequency"), dict):
         validated["keyword_frequency"] = {}
     
-    #depulicate logic
+    # Deduplicate keywords while preserving order
     seen = set()
-    validated["all_keywords"]  = [
-        x for x in validated["all_keywords"]
-        if not (x in seen or seen.add(x))  # deduplicate while preserving order
-    ]          
+    validated["keywords"] = [
+        x for x in validated["keywords"]
+        if not (x in seen or seen.add(x))
+    ]
     return validated
 
 
 # ── Main function ─────────────────────────────────────────────
 async def parse_jd(text: str) -> dict:
-    client = _get_client()
+    client = get_client()
     truncated_text = text[:JD_MAX_CHARS]
     """
     Parse a job description and extract structured requirements.
@@ -171,6 +140,7 @@ async def parse_jd(text: str) -> dict:
                 model=MODEL,
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,
+                response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": SYSTEM},
                     {"role": "user",   "content": f"Parse this job description:\n\n{truncated_text}"}
@@ -178,10 +148,9 @@ async def parse_jd(text: str) -> dict:
             )
 
             raw = resp.choices[0].message.content.strip()
-            raw = _extract_json_from_llm_output(raw)
-            parsed = json.loads(raw)
+            parsed = extract_json(raw)
             validated = JDResponse(**parsed)  # Pydantic validation
-            if not parsed.keywords:
+            if not validated.keywords:
                 raise ValueError("Invalid response structure")
             return _validate(validated.model_dump())
 
