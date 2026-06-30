@@ -205,21 +205,18 @@ export default function App() {
         background:"rgba(10,10,15,.9)", backdropFilter:"blur(12px)"
       }}>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <svg width={22} height={22} viewBox="0 0 22 22">
-            <circle cx={11} cy={11} r={9} fill="none" stroke="#6affb4" strokeWidth={2}/>
-            <circle cx={11} cy={11} r={4} fill="#6affb4"/>
-            <line x1={11} y1={2} x2={11} y2={0} stroke="#6affb4" strokeWidth={2}/>
-            <line x1={20} y1={11} x2={22} y2={11} stroke="#6affb4" strokeWidth={2}/>
-          </svg>
+          <div style={{ width:28, height:28, background:"#6affb4", borderRadius:7, display:"flex", alignItems:"center", justifyContent:"center" }}>
+            <svg width={16} height={16} viewBox="0 0 16 16" fill="none">
+              <rect x={2} y={5} width={12} height={9} rx={2} stroke="#0a0a0f" strokeWidth={1.8}/>
+              <path d="M5 5V4a3 3 0 016 0v1" stroke="#0a0a0f" strokeWidth={1.8} strokeLinecap="round"/>
+              <line x1={8} y1={8} x2={8} y2={11} stroke="#0a0a0f" strokeWidth={1.8} strokeLinecap="round"/>
+              <line x1={6} y1={9.5} x2={10} y2={9.5} stroke="#0a0a0f" strokeWidth={1.8} strokeLinecap="round"/>
+            </svg>
+          </div>
           <span style={{ fontFamily:"'Syne',sans-serif", fontWeight:800, fontSize:18, letterSpacing:"-0.02em" }}>
-            <span style={{ color:"#6affb4" }}>Resume</span>Radar
+            Job<span style={{ color:"#6affb4" }}>Fit</span>
           </span>
         </div>
-        <span style={{
-          fontFamily:"'DM Mono',monospace", fontSize:10,
-          color:"var(--muted)", letterSpacing:"0.12em",
-          border:"1px solid var(--border)", padding:"3px 10px", borderRadius:20
-        }}>FREE · OPEN SOURCE</span>
       </header>
 
       <main style={{ maxWidth:920, margin:"0 auto", padding:"40px 24px 80px" }}>
@@ -230,7 +227,7 @@ export default function App() {
             <div style={{
               fontFamily:"'DM Mono',monospace", fontSize:11, color:"#6affb4",
               letterSpacing:"0.2em", marginBottom:16
-            }}>ATS RESUME SCANNER</div>
+            }}>MATCH · TAILOR · APPLY</div>
             <h1 style={{
               fontFamily:"'Syne',sans-serif", fontWeight:800,
               fontSize:"clamp(32px,5vw,54px)", lineHeight:1.1,
@@ -240,8 +237,8 @@ export default function App() {
               <span style={{ color:"#6affb4" }}>before humans see you.</span>
             </h1>
             <p style={{ color:"var(--muted)", fontSize:15, maxWidth:500, margin:"0 auto" }}>
-              Paste your resume and a job description. 4 AI agents run in sequence —
-              score, gap analysis, keyword detection, and bullet rewrites.
+              Paste your resume and a job description. JobFit scores your match,
+              surfaces every keyword gap, and rewrites your bullets for that role.
             </p>
           </div>
         )}
@@ -357,7 +354,7 @@ export default function App() {
           onMouseEnter={e=>{e.target.style.transform="translateY(-2px)"; e.target.style.boxShadow="0 8px 32px #6affb440"}}
           onMouseLeave={e=>{e.target.style.transform="none"; e.target.style.boxShadow="none"}}
           >
-            ⚡ ANALYZE MY RESUME — 4 AI AGENTS
+            ⚡ ANALYSE MY RESUME
           </button>
         )}
 
@@ -651,7 +648,7 @@ export default function App() {
         <footer style={{ marginTop:60, textAlign:"center" }}>
           <p style={{ fontSize:11, color:"var(--muted)",
             fontFamily:"'DM Mono',monospace", letterSpacing:"0.08em" }}>
-            Built with Groq · Claude · FastAPI · React · Deployed free on Koyeb + Vercel
+            © 2026 JobFit. All rights reserved.
           </p>
         </footer>
       </main>

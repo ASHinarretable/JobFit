@@ -42,8 +42,10 @@ class Job:
 def _strip_html(raw: str) -> str:
     if not raw:
         return ""
-    text = _TAG_RE.sub(" ", raw)
-    text = html.unescape(text)
+    # Greenhouse double-escapes its content (e.g. "&lt;h2&gt;"), so unescape
+    # entities into real tags FIRST, then strip the tags.
+    text = html.unescape(raw)
+    text = _TAG_RE.sub(" ", text)
     return _WS_RE.sub(" ", text).strip()
 
 
